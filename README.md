@@ -6,26 +6,6 @@
 
 将安装了飞牛fnOS的服务器一键配置为专用电视盒的自动化脚本。支持Intel/NVIDIA/AMD显卡自动检测，通过轻量级桌面环境访问飞牛影视，实现大屏幕视频观看体验。
 
-## ⚡ 快速开始
-
-**⚠️ 重要警告**: 此脚本将修改系统配置，包括显卡驱动、桌面环境和启动设置，请先备份重要数据
-
-### 一键安装
-
-```bash
-# 1. SSH连接到fnOS设备
-ssh your-username@your-fnos-ip
-
-# 2. 下载并运行脚本
-wget https://raw.githubusercontent.com/xinnanlyu/fnos-tvbox/main/install.sh
-sudo bash install.sh
-
-# 3. 重启系统
-sudo reboot
-```
-
-> 安装完成后，系统将自动启动电视盒模式
-
 ## 📋 系统要求
 
 ### 硬件要求
@@ -81,32 +61,13 @@ sudo reboot
 - 安装并配置飞牛影视应用，确保正常工作
 
 #### 3. 启用SSH服务
-
-### 建议的额外步骤
-
-#### 4. 修改root密码
-```bash
-# SSH连接到fnOS设备后：
-
-sudo su
-passwd
-
-# 设置一个强密码
-```
-
-#### 5. 准备工作目录
-```bash
-# 切换到root目录
-cd
-
-# 准备下载脚本
-# （下一步会用到git clone）
-```
+- 系统设置 - SSH - 启动SSH功能
 
 
 ## 🚀 快速部署
 
-### 方法一：Git克隆（推荐）
+**⚠️ 重要警告**: 此脚本将修改系统配置，包括显卡驱动、桌面环境和启动设置，请先备份重要数据
+
 
 ```bash
 # 1. SSH连接到fnOS设备
@@ -125,16 +86,6 @@ chmod +x install.sh
 ./install.sh
 ```
 
-### 方法二：直接下载
-
-```bash
-# SSH连接后执行
-sudo su
-cd /root
-wget https://raw.githubusercontent.com/xinnanlyu/fnos-tvbox/main/install.sh
-chmod +x install.sh
-./install.sh
-```
 
 ### 安装过程
 
@@ -151,10 +102,7 @@ chmod +x install.sh
 
 ### 完成部署
 
-```bash
-# 安装完成后重启系统
-reboot
-```
+安装脚本完成后会询问是否立即重启，选择确认即可。
 
 重启后系统将：
 - 自动登录到mediaplayer用户

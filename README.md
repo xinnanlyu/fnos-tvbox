@@ -14,7 +14,7 @@
 
 ```bash
 # 1. SSH连接到fnOS设备
-ssh root@your-fnos-ip
+ssh your-username@your-fnos-ip
 
 # 2. 下载并运行脚本
 wget https://raw.githubusercontent.com/xinnanlyu/fnos-tvbox/main/install.sh

@@ -72,6 +72,42 @@ if [ -z "$INTEL_GPU" ] && [ -z "$NVIDIA_GPU" ] && [ -z "$AMD_GPU" ]; then
     esac
 fi
 
+# 安装确认
+echo ""
+echo "=========================================="
+echo "🔍 显卡检测完成！"
+echo "=========================================="
+if [ "$INTEL_GPU" = "yes" ]; then
+    echo "✓ 将安装 Intel 显卡支持和硬件加速"
+fi
+if [ "$NVIDIA_GPU" = "yes" ]; then
+    echo "✓ 将安装 NVIDIA 显卡支持和硬件加速" 
+fi
+if [ "$AMD_GPU" = "yes" ]; then
+    echo "✓ 将安装 AMD 显卡支持和硬件加速"
+fi
+if [ -z "$INTEL_GPU" ] && [ -z "$NVIDIA_GPU" ] && [ -z "$AMD_GPU" ]; then
+    echo "✓ 将使用通用显卡配置"
+fi
+echo ""
+echo "⚠️  即将开始安装，此过程将："
+echo "   • 修改系统配置和软件包"
+echo "   • 安装桌面环境和浏览器"
+echo "   • 创建专用用户账户"
+echo "   • 配置自动启动和登录"
+echo ""
+read -p "❓ 确定要继续安装吗？(y/N): " INSTALL_CONFIRM
+
+case $INSTALL_CONFIRM in
+    [Yy]|[Yy][Ee][Ss])
+        echo "✅ 开始安装..."
+        ;;
+    *)
+        echo "❌ 安装已取消"
+        exit 0
+        ;;
+esac
+
 # 1. 更新系统
 echo ""
 echo "1. 更新系统包..."
@@ -435,7 +471,16 @@ sleep 8
 wmctrl -r "Chromium" -b add,above 2>/dev/null || true
 xdotool search --name "Chromium" windowactivate 2>/dev/null || true
 
-echo "\$(date): Chromium 启动完成" >> /home/$USERNAME/.local/log/browser.log
+# 等待页面完全加载
+sleep 5
+
+# 自动按回车键进行登录（如果需要）
+echo "\$(date): 尝试自动登录..." >> /home/$USERNAME/.local/log/browser.log
+xdotool search --name "Chromium" windowactivate 2>/dev/null || true
+sleep 1
+xdotool key Return 2>/dev/null || true
+
+echo "\$(date): Chromium 启动完成，已尝试自动登录" >> /home/$USERNAME/.local/log/browser.log
 EOF
 
 chmod +x /home/"$USERNAME"/.local/bin/start-browser.sh
@@ -625,10 +670,10 @@ echo "- F11: 切换全屏"
 echo "- F5: 刷新页面"
 echo ""
 echo "重要提示:"
-echo "1. 现在请重启系统: reboot"
-echo "2. 重启后将自动登录并启动浏览器"
-echo "3. 防撕裂配置需要重启后生效"
-echo "4. 如有问题，按 Ctrl+Alt+T 打开终端进行调试"
+echo "✓ 安装已完成，需要重启生效"
+echo "✓ 重启后将自动登录并启动浏览器"
+echo "✓ 防撕裂配置需要重启后生效"
+echo "✓ 如有问题，按 Ctrl+Alt+T 打开终端进行调试"
 echo ""
 echo "硬件加速验证:"
 echo "- 重启后运行: vainfo"
@@ -637,3 +682,20 @@ echo "- Intel GPU: sudo intel_gpu_top"
 echo "- NVIDIA GPU: nvidia-smi"
 echo "- AMD GPU: radeontop"
 echo ""
+
+# 重启确认
+echo "=========================================="
+read -p "🔄 是否立即重启系统使配置生效？(y/N): " REBOOT_CONFIRM
+
+case $REBOOT_CONFIRM in
+    [Yy]|[Yy][Ee][Ss])
+        echo "✅ 正在重启系统..."
+        sleep 2
+        reboot
+        ;;
+    *)
+        echo "⏭️  已跳过重启"
+        echo "💡 手动重启命令: sudo reboot"
+        echo "🎉 感谢使用飞牛电视盒配置脚本！"
+        ;;
+esac

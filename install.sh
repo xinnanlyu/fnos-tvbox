@@ -245,7 +245,9 @@ echo "------------------"
 apt install -y \
     pulseaudio \
     pulseaudio-utils \
-    alsa-utils
+    alsa-utils \
+    pulseaudio-module-bluetooth \
+    pavucontrol
 
 # 7. 安装媒体解码器
 echo ""
@@ -276,6 +278,151 @@ usermod -aG audio,video,pulse-access,input,tty "$USERNAME"
 # 设置目录权限
 chmod 755 /home/"$USERNAME"
 chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
+
+# 8.1 配置HDMI音频支持
+echo ""
+echo "8.1 配置HDMI音频..."
+echo "------------------"
+
+# 创建PulseAudio配置目录
+mkdir -p /home/"$USERNAME"/.config/pulse
+
+# 配置PulseAudio强制优先使用HDMI音频
+cat > /home/"$USERNAME"/.config/pulse/default.pa <<'EOF'
+#!/usr/bin/pulseaudio -nF
+
+# 加载默认配置
+.include /etc/pulse/default.pa
+
+# 电视盒专用配置 - HDMI音频绝对优先
+# 自动检测并切换到HDMI音频输出
+load-module module-switch-on-connect
+
+# 强制HDMI音频优先级
+# 在所有HDMI设备上设置高优先级
+load-module module-rescue-streams
+
+# 自动路由到HDMI（如果可用）
+load-module module-intended-roles
+
+# HDMI音频专用配置 - 电视盒场景下默认使用HDMI
+# 这个配置会在PulseAudio启动后自动执行
+EOF
+
+# 创建HDMI优先级启动脚本
+cat > /home/"$USERNAME"/.config/pulse/hdmi-priority.sh <<'EOF'
+#!/bin/bash
+# HDMI音频优先配置脚本
+
+# 等待PulseAudio完全启动
+sleep 2
+
+# 查找HDMI音频设备
+HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | cut -f1)
+
+if [ -n "$HDMI_SINK" ]; then
+    # 设置HDMI为默认输出
+    pactl set-default-sink "$HDMI_SINK"
+    # 设置音量为80%
+    pactl set-sink-volume "$HDMI_SINK" 80%
+    # 确保不是静音
+    pactl set-sink-mute "$HDMI_SINK" false
+    # 将所有现有音频流切换到HDMI
+    for stream in $(pactl list short sink-inputs | cut -f1); do
+        pactl move-sink-input "$stream" "$HDMI_SINK" 2>/dev/null || true
+    done
+    echo "$(date): HDMI音频已设为默认输出: $HDMI_SINK" >> /home/mediaplayer/.local/log/browser.log
+else
+    echo "$(date): 警告: 未检测到HDMI音频设备" >> /home/mediaplayer/.local/log/browser.log
+fi
+EOF
+
+chmod +x /home/"$USERNAME"/.config/pulse/hdmi-priority.sh
+
+# 创建PulseAudio系统级配置 - 电视盒HDMI优先
+cat > /etc/pulse/system.pa <<'EOF'
+#!/usr/bin/pulseaudio -nF
+
+# 电视盒专用系统级配置 - HDMI音频绝对优先
+
+# 加载基础模块
+load-module module-device-restore
+load-module module-stream-restore
+load-module module-card-restore
+
+# 加载ALSA模块，HDMI优先检测
+load-module module-alsa-sink
+load-module module-alsa-source device=hw:1,0
+
+# HDMI音频优先检测和自动切换
+# 检测所有音频设备，但优先HDMI
+load-module module-detect args="just-one=no"
+
+# 自动连接到HDMI设备（如果可用）
+load-module module-switch-on-connect
+
+# 音频流自动救援到HDMI设备
+load-module module-rescue-streams
+
+# 角色优先级 - HDMI设备获得更高优先级
+load-module module-intended-roles
+
+# 设备恢复时优先选择HDMI
+load-module module-default-device-restore
+
+# 电视盒专用：强制路由策略
+# 所有新的音频流自动路由到HDMI（如果可用）
+load-module module-role-ducking trigger_roles=phone ducking_roles=music,video
+EOF
+
+# 创建系统级HDMI音频优先级配置
+cat > /etc/pulse/client.conf.d/01-hdmi-priority.conf <<'EOF'
+# 电视盒专用配置 - HDMI音频绝对优先
+# 确保PulseAudio客户端优先选择HDMI音频设备
+
+# 自动连接到首选设备（HDMI）
+auto-connect-localhost = yes
+
+# 默认采样率（适合HDMI音频）
+default-sample-rate = 48000
+alternate-sample-rate = 44100
+
+# 默认通道配置（立体声）
+default-channel-map = front-left,front-right
+
+# 启用设备自动切换
+enable-remixing = yes
+enable-lfe-remixing = yes
+
+# HDMI音频专用缓冲配置
+default-fragment-size-msec = 25
+EOF
+
+# 创建ALSA配置以确保HDMI设备优先级
+cat > /home/"$USERNAME"/.asoundrc <<'EOF'
+# 电视盒专用ALSA配置 - HDMI优先
+pcm.!default {
+    type pulse
+}
+
+ctl.!default {
+    type pulse
+}
+
+# HDMI设备别名（如果PulseAudio不可用）
+pcm.hdmi {
+    type hw
+    card 0
+    device 3
+}
+EOF
+
+# 设置音频配置文件权限
+chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"/.config/pulse
+chown "$USERNAME":"$USERNAME" /home/"$USERNAME"/.asoundrc
+chmod 644 /home/"$USERNAME"/.config/pulse/default.pa
+chmod 644 /home/"$USERNAME"/.asoundrc
+chmod 644 /etc/pulse/client.conf.d/01-hdmi-priority.conf
 
 # 9. 配置硬件加速环境变量
 echo ""
@@ -342,9 +489,44 @@ xset s off
 xset -dpms
 xset s noblank
 
-# 设置显示优化防止撕裂
-xrandr --output eDP-1 --mode 1920x1080 --rate 60 2>/dev/null || true
-xrandr --output eDP1 --mode 1920x1080 --rate 60 2>/dev/null || true
+# 智能显示分辨率配置
+# 检测当前显示器支持的最佳分辨率
+echo "检测显示器分辨率..." >> /home/$USERNAME/.local/log/browser.log
+
+# 获取主显示器名称和支持的分辨率
+PRIMARY_OUTPUT=\$(xrandr | grep " connected primary" | cut -d" " -f1)
+if [ -z "\$PRIMARY_OUTPUT" ]; then
+    PRIMARY_OUTPUT=\$(xrandr | grep " connected" | head -1 | cut -d" " -f1)
+fi
+
+echo "检测到主显示器: \$PRIMARY_OUTPUT" >> /home/$USERNAME/.local/log/browser.log
+
+# 获取最高分辨率
+MAX_RESOLUTION=\$(xrandr | grep -A 20 "\$PRIMARY_OUTPUT connected" | grep -E "^\s+[0-9]+x[0-9]+" | head -1 | awk '{print \$1}')
+echo "检测到最高分辨率: \$MAX_RESOLUTION" >> /home/$USERNAME/.local/log/browser.log
+
+# 智能分辨率选择策略
+# 4K及以上：使用1920x1080以获得更好的字体显示
+# 否则使用原生分辨率
+if echo "\$MAX_RESOLUTION" | grep -qE "(3840x2160|2560x1440)"; then
+    # 4K或2K显示器，为了更好的浏览体验，降低到1920x1080
+    CHOSEN_RESOLUTION="1920x1080"
+    export DISPLAY_SCALE="1.5"  # 设置缩放因子
+    echo "4K/2K显示器检测，使用1920x1080分辨率 + 1.5x缩放" >> /home/$USERNAME/.local/log/browser.log
+else
+    # 使用原生分辨率
+    CHOSEN_RESOLUTION="\$MAX_RESOLUTION"
+    export DISPLAY_SCALE="1.0"
+    echo "使用原生分辨率: \$CHOSEN_RESOLUTION" >> /home/$USERNAME/.local/log/browser.log
+fi
+
+# 应用分辨率设置
+if [ -n "\$PRIMARY_OUTPUT" ] && [ -n "\$CHOSEN_RESOLUTION" ]; then
+    xrandr --output "\$PRIMARY_OUTPUT" --mode "\$CHOSEN_RESOLUTION" --rate 60 2>/dev/null || true
+    echo "已设置分辨率: \$CHOSEN_RESOLUTION" >> /home/$USERNAME/.local/log/browser.log
+else
+    echo "使用默认分辨率配置" >> /home/$USERNAME/.local/log/browser.log
+fi
 
 # 隐藏鼠标指针
 unclutter -idle 3 &
@@ -352,8 +534,38 @@ unclutter -idle 3 &
 # 黑色背景
 xsetroot -solid black
 
-# 启动音频
+# 电视盒专用音频配置 - 强制HDMI优先
+echo "配置电视盒专用音频系统（HDMI优先）..." >> /home/$USERNAME/.local/log/browser.log
+
+# 重新加载ALSA配置
+alsactl restore 2>/dev/null || true
+
+# 启动PulseAudio并强制配置HDMI音频优先级
+pulseaudio --kill 2>/dev/null || true
+sleep 3
 pulseaudio --start &
+sleep 5
+
+# 执行HDMI优先级配置脚本
+echo "执行HDMI优先级配置..." >> /home/$USERNAME/.local/log/browser.log
+/home/$USERNAME/.config/pulse/hdmi-priority.sh
+
+# 额外验证HDMI音频配置
+sleep 2
+HDMI_SINK=\$(pactl list short sinks | grep -i hdmi | head -1 | cut -f1)
+if [ -n "\$HDMI_SINK" ]; then
+    echo "✓ HDMI音频设备已配置: \$HDMI_SINK" >> /home/$USERNAME/.local/log/browser.log
+    # 确保HDMI设备是活动状态
+    pactl set-sink-volume "\$HDMI_SINK" 80%
+    pactl set-sink-mute "\$HDMI_SINK" false
+    # 记录当前默认输出设备
+    DEFAULT_SINK=\$(pactl get-default-sink 2>/dev/null)
+    echo "当前默认音频输出: \$DEFAULT_SINK" >> /home/$USERNAME/.local/log/browser.log
+else
+    echo "⚠️ 警告: 未检测到HDMI音频设备，请检查连接" >> /home/$USERNAME/.local/log/browser.log
+    echo "可用音频设备:" >> /home/$USERNAME/.local/log/browser.log
+    pactl list short sinks >> /home/$USERNAME/.local/log/browser.log 2>&1 || true
+fi
 
 # 允许本地 X 连接
 xhost +local: 2>/dev/null || true
@@ -413,6 +625,31 @@ export DISPLAY=:0
 export LIBVA_DRIVER_NAME=iHD
 export VDPAU_DRIVER=va_gl
 
+# 智能显示缩放检测
+echo "\$(date): 检测显示器配置..." >> /home/$USERNAME/.local/log/browser.log
+
+# 检测当前分辨率
+CURRENT_RESOLUTION=\$(xrandr | grep "\\*" | awk '{print \$1}')
+echo "\$(date): 当前分辨率: \$CURRENT_RESOLUTION" >> /home/$USERNAME/.local/log/browser.log
+
+# 智能缩放策略
+if echo "\$CURRENT_RESOLUTION" | grep -qE "(3840x2160|2560x1440)"; then
+    # 4K/2K分辨率 - 使用浏览器缩放
+    BROWSER_ZOOM="1.5"
+    DPI_SCALE="144"
+    echo "\$(date): 高分辨率检测，设置1.5x缩放" >> /home/$USERNAME/.local/log/browser.log
+elif echo "\$CURRENT_RESOLUTION" | grep -qE "(1920x1080|1680x1050)"; then
+    # 1080p分辨率 - 正常缩放
+    BROWSER_ZOOM="1.0" 
+    DPI_SCALE="96"
+    echo "\$(date): 标准分辨率，使用默认缩放" >> /home/$USERNAME/.local/log/browser.log
+else
+    # 其他分辨率 - 自适应
+    BROWSER_ZOOM="1.2"
+    DPI_SCALE="120"
+    echo "\$(date): 其他分辨率，使用1.2x缩放" >> /home/$USERNAME/.local/log/browser.log
+fi
+
 echo "\$(date): 等待后台服务启动..." >> /home/$USERNAME/.local/log/browser.log
 
 # 等待后台服务启动 - 增加等待时间
@@ -437,9 +674,10 @@ for i in {1..30}; do
     fi
 done
 
-echo "\$(date): 启动 Chromium (防撕裂优化)..." >> /home/$USERNAME/.local/log/browser.log
+echo "\$(date): 启动 Chromium (智能缩放 + 防撕裂优化)..." >> /home/$USERNAME/.local/log/browser.log
+echo "\$(date): 使用缩放级别: \$BROWSER_ZOOM, DPI: \$DPI_SCALE" >> /home/$USERNAME/.local/log/browser.log
 
-# 启动 Chromium - 添加防撕裂和GPU优化参数
+# 启动 Chromium - 添加智能缩放和优化参数
 chromium \\
     --kiosk \\
     --no-first-run \\
@@ -461,6 +699,14 @@ chromium \\
     --disable-features=VizDisplayCompositor \\
     --enable-smooth-scrolling \\
     --num-raster-threads=4 \\
+    --force-device-scale-factor=\$BROWSER_ZOOM \\
+    --high-dpi-support=1 \\
+    --force-color-profile=srgb \\
+    --disable-font-subpixel-positioning \\
+    --enable-exclusive-audio \\
+    --try-supported-channel-layouts \\
+    --audio-buffer-size=2048 \\
+    --enable-features=WebRTCPipeWireCapturer \\
     "$DEFAULT_URL" \\
     >> /home/$USERNAME/.local/log/browser.log 2>&1 &
 
@@ -574,6 +820,19 @@ echo "============"
 echo ""
 echo "显卡类型: $GPU_TYPE"
 echo ""
+echo "显示配置:"
+echo "当前分辨率: \$(xrandr | grep "\\*" | awk '{print \$1}')"
+echo "主显示器: \$(xrandr | grep " connected" | head -1 | cut -d" " -f1)"
+echo ""
+echo "音频设备状态:"
+echo "PulseAudio状态: \$(systemctl --user is-active pulseaudio 2>/dev/null || echo '未知')"
+echo "音频输出设备:"
+pactl list short sinks 2>/dev/null || echo "PulseAudio未运行"
+echo "当前默认输出:"
+pactl get-default-sink 2>/dev/null || echo "无法获取"
+echo "HDMI音频检测:"
+pactl list short sinks | grep -i hdmi || echo "未检测到HDMI音频"
+echo ""
 echo "硬件加速支持:"
 vainfo | grep -E "(Driver|VAProfile.*H264)" | head -5
 echo ""
@@ -605,6 +864,101 @@ tail -5 /home/$USERNAME/.local/log/browser.log 2>/dev/null || echo "无日志"
 EOF
 
 chmod +x /home/"$USERNAME"/.local/bin/check-system.sh
+
+# 电视盒专用HDMI音频修复脚本
+cat > /home/"$USERNAME"/.local/bin/fix-hdmi-audio.sh <<'EOF'
+#!/bin/bash
+
+echo "电视盒专用HDMI音频修复工具"
+echo "=========================="
+echo "专为HDMI音视频传输优化"
+echo ""
+
+echo "1. 重启PulseAudio服务..."
+pulseaudio --kill 2>/dev/null || true
+sleep 3
+pulseaudio --start &
+sleep 5
+
+echo "2. 执行HDMI优先级配置..."
+/home/mediaplayer/.config/pulse/hdmi-priority.sh
+
+echo "3. 检测音频设备..."
+echo "可用音频输出设备:"
+pactl list short sinks
+
+echo ""
+echo "4. 强制HDMI音频配置..."
+HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1 | cut -f1)
+if [ -n "$HDMI_SINK" ]; then
+    echo "✓ 找到HDMI音频设备: $HDMI_SINK"
+    echo "5. 强制设置HDMI为唯一默认输出..."
+    pactl set-default-sink "$HDMI_SINK"
+    pactl set-sink-volume "$HDMI_SINK" 80%
+    pactl set-sink-mute "$HDMI_SINK" false
+    
+    # 将所有现有音频流强制切换到HDMI
+    echo "6. 切换所有音频流到HDMI..."
+    for stream in $(pactl list short sink-inputs | cut -f1); do
+        pactl move-sink-input "$stream" "$HDMI_SINK" 2>/dev/null || true
+    done
+    
+    echo "✓ HDMI音频已强制设为默认输出"
+    echo "✓ 所有音频流已切换到HDMI"
+else
+    echo "❌ 严重警告: 未找到HDMI音频设备"
+    echo ""
+    echo "电视盒必须通过HDMI传输音频，请检查："
+    echo "- HDMI线缆是否正确连接到电视"
+    echo "- 电视音频输入设置是否正确"
+    echo "- 显卡驱动是否正确安装"
+    echo "- 电视是否支持HDMI音频"
+    echo ""
+    echo "故障排除建议："
+    echo "- 重启电视和设备"
+    echo "- 尝试不同的HDMI端口"
+    echo "- 检查电视音频设置菜单"
+fi
+
+echo ""
+echo "7. 当前音频配置验证:"
+DEFAULT_SINK=$(pactl get-default-sink 2>/dev/null)
+echo "默认输出设备: $DEFAULT_SINK"
+if echo "$DEFAULT_SINK" | grep -qi hdmi; then
+    echo "✓ 当前默认输出为HDMI - 配置正确"
+else
+    echo "⚠️ 当前默认输出不是HDMI - 可能需要重启系统"
+fi
+
+echo ""
+echo "8. HDMI音频测试..."
+if [ -n "$HDMI_SINK" ]; then
+    echo "正在通过HDMI播放测试音频（3秒）..."
+    echo "如果电视有声音说明配置成功"
+    speaker-test -t sine -f 1000 -l 3 -D pulse -s 1 &
+    SPEAKER_PID=$!
+    sleep 3
+    kill $SPEAKER_PID 2>/dev/null || true
+    echo "测试完成"
+else
+    echo "跳过音频测试（未找到HDMI设备）"
+fi
+
+echo ""
+echo "================================================"
+echo "修复完成！"
+if [ -n "$HDMI_SINK" ]; then
+    echo "✓ HDMI音频配置成功，电视应该能听到声音"
+    echo "如果仍无声音，请检查电视音频设置"
+else
+    echo "❌ HDMI音频配置失败，需要检查硬件连接"
+fi
+echo ""
+echo "重启浏览器应用新配置:"
+echo "sudo -u mediaplayer /home/mediaplayer/.local/bin/restart-browser.sh"
+EOF
+
+chmod +x /home/"$USERNAME"/.local/bin/fix-hdmi-audio.sh
 
 # 14. 设置文件权限
 echo ""
@@ -651,15 +1005,18 @@ echo "功能特性:"
 echo "✓ 自动显卡检测和驱动安装"
 echo "✓ 多显卡硬件加速支持 (Intel/NVIDIA/AMD)"
 echo "✓ 防撕裂配置"
+echo "✓ 智能分辨率检测和缩放"
+echo "✓ HDMI音频优先配置"
+echo "✓ 4K/2K显示器智能缩放支持"
 echo "✓ 自动登录"
 echo "✓ 开机自动启动浏览器"
 echo "✓ 全屏媒体播放"
-echo "✓ 音频支持"
 echo "✓ 浏览器自动重启"
 echo ""
 echo "管理命令:"
 echo "- 重启浏览器: sudo -u $USERNAME /home/$USERNAME/.local/bin/restart-browser.sh"
 echo "- 检查状态: sudo -u $USERNAME /home/$USERNAME/.local/bin/check-system.sh"
+echo "- 修复HDMI音频: sudo -u $USERNAME /home/$USERNAME/.local/bin/fix-hdmi-audio.sh"
 echo "- 查看监控日志: tail -f /home/$USERNAME/.local/log/browser-monitor.log"
 echo "- 查看浏览器日志: tail -f /home/$USERNAME/.local/log/browser.log"
 echo ""

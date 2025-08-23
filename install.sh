@@ -6,6 +6,12 @@
 
 set -e  # 遇到错误立即退出
 
+# 检查并提升权限
+if [ "$EUID" -ne 0 ]; then
+    echo "检测到非 root 用户运行，正在自动提升权限..."
+    exec sudo "$0" "$@"
+fi
+
 echo "Debian 媒体播放系统安装"
 echo "======================"
 echo ""

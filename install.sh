@@ -5,216 +5,630 @@
 # 实现：Openbox + Chromium + 自动登录 + 硬件加速
 
 set -e  # 遇到错误立即退出
+set -u  # 使用未定义变量时报错
+set -o pipefail  # 管道中任何命令失败都会导致整个管道失败
+
+# 全局变量
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly LOG_FILE="/tmp/fnos-tvbox-install.log"
+readonly BACKUP_DIR="/tmp/fnos-tvbox-backup-$(date +%Y%m%d-%H%M%S)"
+
+# 标准化日志函数
+log_info() {
+    local msg="$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $msg" | tee -a "$LOG_FILE"
+}
+
+log_warn() {
+    local msg="$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] $msg" | tee -a "$LOG_FILE" >&2
+}
+
+log_error() {
+    local msg="$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $msg" | tee -a "$LOG_FILE" >&2
+}
+
+log_success() {
+    local msg="$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [SUCCESS] $msg" | tee -a "$LOG_FILE"
+}
+
+# 错误处理函数
+handle_error() {
+    local line_no=$1
+    local error_code=$2
+    log_error "脚本在第 $line_no 行出错，退出码: $error_code"
+    log_error "查看详细日志: $LOG_FILE"
+    exit $error_code
+}
+
+# 设置错误陷阱
+trap 'handle_error ${LINENO} $?' ERR
+
+# 清理函数
+cleanup_on_exit() {
+    log_info "清理临时文件..."
+    
+    # 清理apt缓存
+    apt autoremove -y >/dev/null 2>&1 || true
+    apt autoclean >/dev/null 2>&1 || true
+    
+    # 清理临时安装文件
+    rm -rf /tmp/fnos-tvbox-temp-* >/dev/null 2>&1 || true
+    
+    # 记录安装统计
+    log_installation_stats
+}
+
+# 记录安装统计信息
+log_installation_stats() {
+    local end_time=$(date)
+    local disk_usage=$(df -h / | awk 'NR==2 {print $3}')
+    local memory_usage=$(free -h | awk 'NR==2 {print $3}')
+    
+    log_info "==============================================="
+    log_info "安装统计信息"
+    log_info "==============================================="
+    log_info "结束时间: $end_time"
+    log_info "磁盘使用: $disk_usage"
+    log_info "内存使用: $memory_usage"
+    log_info "日志文件: $LOG_FILE"
+    log_info "备份目录: $BACKUP_DIR"
+    log_info "==============================================="
+}
+
+# 性能优化函数
+optimize_system_performance() {
+    log_info "应用系统性能优化..."
+    
+    # 创建临时文件用于验证操作
+    local temp_file="/tmp/fnos-tvbox-temp-$$"
+    
+    # 优化I/O调度器 (适用于SSD)
+    if [[ -f "/sys/block/sda/queue/scheduler" ]]; then
+        echo "mq-deadline" > /sys/block/sda/queue/scheduler 2>/dev/null || true
+        log_info "已设置I/O调度器为mq-deadline"
+    fi
+    
+    # 设置CPU频率调节器 (适用于桌面使用)
+    if command -v cpufreq-set >/dev/null 2>&1; then
+        cpufreq-set -g performance >/dev/null 2>&1 || true
+        log_info "已设置CPU频率调节器为performance"
+    fi
+    
+    # 清理测试文件
+    rm -f "$temp_file" 2>/dev/null || true
+    
+    log_success "系统性能优化完成"
+}
+
+# 资源使用监控
+monitor_resources() {
+    log_info "当前系统资源状况:"
+    
+    # CPU负载
+    local cpu_load=$(uptime | awk -F'load average:' '{print $2}')
+    log_info "CPU负载:$cpu_load"
+    
+    # 内存使用
+    local memory_info=$(free -h | awk 'NR==2 {printf "使用: %s/%s (%.1f%%)", $3, $2, ($3/$2)*100}')
+    log_info "内存 $memory_info"
+    
+    # 磁盘使用
+    local disk_info=$(df -h / | awk 'NR==2 {printf "使用: %s/%s (%s)", $3, $2, $5}')
+    log_info "磁盘 $disk_info"
+}
+
+trap cleanup_on_exit EXIT
+
+# 安全验证函数
+verify_command() {
+    local cmd="$1"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        log_error "必需命令不存在: $cmd"
+        return 1
+    fi
+}
+
+# 检查必需命令
+check_prerequisites() {
+    log_info "检查系统必需命令..."
+    local required_commands=("apt" "systemctl" "lspci" "xrandr")
+    
+    for cmd in "${required_commands[@]}"; do
+        verify_command "$cmd"
+    done
+    
+    log_success "系统必需命令检查完成"
+}
+
+# 备份重要文件
+backup_file() {
+    local file_path="$1"
+    if [[ -f "$file_path" ]]; then
+        mkdir -p "$BACKUP_DIR"
+        cp "$file_path" "$BACKUP_DIR/" 2>/dev/null || true
+        log_info "已备份文件: $file_path"
+    fi
+}
+
+# 安全执行命令
+safe_execute() {
+    local cmd="$*"
+    log_info "执行命令: $cmd"
+    
+    if ! eval "$cmd" >> "$LOG_FILE" 2>&1; then
+        log_error "命令执行失败: $cmd"
+        return 1
+    fi
+    
+    return 0
+}
+
+# 初始化日志
+log_info "fnOS电视盒配置脚本开始执行"
+log_info "脚本位置: $SCRIPT_DIR"
+log_info "日志文件: $LOG_FILE"
+log_info "备份目录: $BACKUP_DIR"
+
+# 执行系统检查
+check_prerequisites
 
 # 检查并提升权限
-if [ "$EUID" -ne 0 ]; then
-    echo "检测到非 root 用户运行，正在自动提升权限..."
-    exec sudo "$0" "$@"
-fi
+check_root_privileges() {
+    if [[ "$EUID" -ne 0 ]]; then
+        log_warn "检测到非 root 用户运行，正在自动提升权限..."
+        exec sudo "$0" "$@"
+    fi
+    log_success "root 权限验证通过"
+}
 
-echo "Debian 媒体播放系统安装"
-echo "======================"
-echo ""
-echo "此脚本将安装和配置："
-echo "- Intel 显卡驱动和硬件加速"
-echo "- Openbox 轻量级桌面环境"
-echo "- Chromium 浏览器"
-echo "- 自动登录到媒体播放用户"
-echo "- 开机自动启动浏览器全屏播放"
-echo ""
+check_root_privileges "$@"
 
-# 配置参数
-USERNAME="mediaplayer"
-DEFAULT_URL="http://127.0.0.1:5666/v"
+# 显示安装信息
+display_install_info() {
+    log_info "Debian 媒体播放系统安装"
+    log_info "======================"
+    log_info ""
+    log_info "此脚本将安装和配置："
+    log_info "- 多显卡驱动和硬件加速 (Intel/NVIDIA/AMD)"
+    log_info "- Openbox 轻量级桌面环境"
+    log_info "- Chromium 浏览器 (硬件加速优化)"
+    log_info "- 自动登录和音频配置"
+    log_info "- 开机自动启动浏览器全屏播放"
+    log_info ""
+}
 
-echo ""
-echo "开始系统检测和安装..."
+display_install_info
 
-# 检测显卡类型
-echo ""
-echo "🔍 检测显卡硬件..."
-echo "-------------------"
+# 配置参数 - 使用只读变量提高安全性
+readonly USERNAME="${FNOS_USERNAME:-mediaplayer}"
+readonly DEFAULT_URL="${FNOS_DEFAULT_URL:-http://127.0.0.1:5666/v}"
+readonly USER_HOME="/home/$USERNAME"
 
-# 获取显卡信息
-GPU_INFO=$(lspci | grep -i vga)
-echo "检测到显卡: $GPU_INFO"
-
-# 检测显卡厂商
-INTEL_GPU=""
-NVIDIA_GPU=""
-AMD_GPU=""
-
-if echo "$GPU_INFO" | grep -qi intel; then
-    INTEL_GPU="yes"
-    echo "✓ 检测到 Intel 显卡"
-fi
-
-if echo "$GPU_INFO" | grep -qi nvidia; then
-    NVIDIA_GPU="yes"
-    echo "✓ 检测到 NVIDIA 显卡"
-fi
-
-if echo "$GPU_INFO" | grep -qi amd || echo "$GPU_INFO" | grep -qi radeon; then
-    AMD_GPU="yes"
-    echo "✓ 检测到 AMD 显卡"
-fi
-
-# 如果没有检测到支持的显卡，询问用户
-if [ -z "$INTEL_GPU" ] && [ -z "$NVIDIA_GPU" ] && [ -z "$AMD_GPU" ]; then
-    echo "⚠️  未能自动识别显卡类型"
-    echo "请手动选择显卡类型："
-    echo "1) Intel"
-    echo "2) NVIDIA" 
-    echo "3) AMD"
-    echo "4) 其他/未知"
-    read -p "请选择 (1-4): " GPU_CHOICE
+# 验证配置参数
+validate_config() {
+    log_info "验证配置参数..."
     
-    case $GPU_CHOICE in
-        1) INTEL_GPU="yes" ;;
-        2) NVIDIA_GPU="yes" ;;
-        3) AMD_GPU="yes" ;;
-        4) echo "将使用通用配置" ;;
-        *) echo "无效选择，使用通用配置" ;;
+    # 检查用户名合法性
+    if [[ ! "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+        log_error "无效的用户名: $USERNAME"
+        return 1
+    fi
+    
+    # 检查URL格式
+    if [[ ! "$DEFAULT_URL" =~ ^https?:// ]]; then
+        log_error "无效的URL格式: $DEFAULT_URL"
+        return 1
+    fi
+    
+    log_info "配置用户: $USERNAME"
+    log_info "默认URL: $DEFAULT_URL"
+    log_info "用户目录: $USER_HOME"
+    log_success "配置参数验证通过"
+}
+
+validate_config
+
+log_info "开始系统检测和安装..."
+
+# 音频设备检测函数
+detect_audio_devices() {
+    log_info "🔊 检测音频设备..."
+    
+    # 获取音频设备信息
+    local audio_info
+    if audio_info=$(lspci | grep -i audio); then
+        log_info "检测到音频设备: $audio_info"
+    else
+        log_warn "未检测到音频设备信息"
+    fi
+    
+    # 确保音频测试工具可用
+    ensure_audio_tools
+    
+    # 测试HDMI音频输出
+    test_hdmi_audio_outputs
+}
+
+# 确保音频测试工具可用
+ensure_audio_tools() {
+    log_info "确保音频测试工具可用..."
+    
+    if ! command -v speaker-test >/dev/null 2>&1; then
+        log_info "安装音频测试工具..."
+        safe_execute "apt-get update -qq"
+        safe_execute "apt-get install -y alsa-utils"
+    fi
+    
+    log_success "音频测试工具准备完成"
+}
+
+# 测试HDMI音频输出
+test_hdmi_audio_outputs() {
+    log_info "🎵 测试HDMI音频输出..."
+    
+    # 全局变量初始化
+    WORKING_AUDIO_DEVICE=""
+    AUDIO_CARD=""
+    AUDIO_DEVICE=""
+    
+    # 寻找测试音频文件
+    local test_sound=""
+    local test_files=("/usr/share/sounds/alsa/Noise.wav" "/usr/share/sounds/alsa/Front_Right.wav")
+    
+    for file in "${test_files[@]}"; do
+        if [[ -f "$file" ]]; then
+            test_sound="$file"
+            break
+        fi
+    done
+    
+    # 测试所有可能的HDMI音频设备
+    local found=false
+    for card in {0..2}; do
+        for device in {3..9}; do
+            local audio_device="hw:$card,$device"
+            log_info "测试音频设备 $audio_device ..."
+            
+            # 使用可用的测试方法
+            local test_cmd
+            if [[ -n "$test_sound" ]]; then
+                test_cmd="timeout 2 aplay -D plughw:$card,$device '$test_sound'"
+            else
+                test_cmd="timeout 2 speaker-test -D plughw:$card,$device -c 2 -t sine -l 1"
+            fi
+            
+            if eval "$test_cmd" >/dev/null 2>&1; then
+                log_success "找到工作的音频设备: $audio_device"
+                WORKING_AUDIO_DEVICE="$audio_device"
+                AUDIO_CARD="$card"
+                AUDIO_DEVICE="$device"
+                found=true
+                break 2
+            fi
+        done
+    done
+    
+    # 设置默认音频设备
+    if [[ "$found" == "false" ]]; then
+        log_warn "未找到工作的HDMI音频设备，将使用默认配置"
+        WORKING_AUDIO_DEVICE="hw:0,3"
+        AUDIO_CARD="0"  
+        AUDIO_DEVICE="3"
+    fi
+    
+    log_info "最终音频设备配置: $WORKING_AUDIO_DEVICE"
+}
+
+# 执行音频设备检测
+detect_audio_devices
+
+# 显卡硬件检测函数
+detect_gpu_hardware() {
+    log_info "🔍 检测显卡硬件..."
+    
+    # 全局变量初始化
+    INTEL_GPU=""
+    NVIDIA_GPU=""
+    AMD_GPU=""
+    GPU_TYPE=""
+    
+    # 获取显卡信息
+    local gpu_info
+    if gpu_info=$(lspci | grep -i vga); then
+        log_info "检测到显卡: $gpu_info"
+        analyze_gpu_type "$gpu_info"
+    else
+        log_warn "未检测到显卡信息"
+        prompt_manual_gpu_selection
+    fi
+    
+    # 确定最终GPU类型
+    determine_gpu_type
+}
+
+# 分析显卡类型
+analyze_gpu_type() {
+    local gpu_info="$1"
+    
+    if echo "$gpu_info" | grep -qi intel; then
+        INTEL_GPU="yes"
+        log_success "检测到 Intel 显卡"
+    fi
+    
+    if echo "$gpu_info" | grep -qi nvidia; then
+        NVIDIA_GPU="yes"
+        log_success "检测到 NVIDIA 显卡"
+    fi
+    
+    if echo "$gpu_info" | grep -qi -E "(amd|radeon)"; then
+        AMD_GPU="yes"
+        log_success "检测到 AMD 显卡"
+    fi
+    
+    # 如果没有检测到支持的显卡
+    if [[ -z "$INTEL_GPU" && -z "$NVIDIA_GPU" && -z "$AMD_GPU" ]]; then
+        log_warn "未能自动识别显卡类型"
+        prompt_manual_gpu_selection
+    fi
+}
+
+# 手动选择显卡类型
+prompt_manual_gpu_selection() {
+    log_warn "请手动选择显卡类型："
+    echo "1) Intel"
+    echo "2) NVIDIA"
+    echo "3) AMD" 
+    echo "4) 其他/未知"
+    
+    local gpu_choice
+    read -p "请选择 (1-4): " gpu_choice
+    
+    case $gpu_choice in
+        1) 
+            INTEL_GPU="yes"
+            log_info "手动选择了 Intel 显卡"
+            ;;
+        2) 
+            NVIDIA_GPU="yes"
+            log_info "手动选择了 NVIDIA 显卡"
+            ;;
+        3) 
+            AMD_GPU="yes"
+            log_info "手动选择了 AMD 显卡"
+            ;;
+        4|*) 
+            log_info "将使用通用显卡配置"
+            ;;
     esac
-fi
+}
 
-# 安装确认
-echo ""
-echo "=========================================="
-echo "🔍 显卡检测完成！"
-echo "=========================================="
-if [ "$INTEL_GPU" = "yes" ]; then
-    echo "✓ 将安装 Intel 显卡支持和硬件加速"
-fi
-if [ "$NVIDIA_GPU" = "yes" ]; then
-    echo "✓ 将安装 NVIDIA 显卡支持和硬件加速" 
-fi
-if [ "$AMD_GPU" = "yes" ]; then
-    echo "✓ 将安装 AMD 显卡支持和硬件加速"
-fi
-if [ -z "$INTEL_GPU" ] && [ -z "$NVIDIA_GPU" ] && [ -z "$AMD_GPU" ]; then
-    echo "✓ 将使用通用显卡配置"
-fi
-echo ""
-echo "⚠️  即将开始安装，此过程将："
-echo "   • 修改系统配置和软件包"
-echo "   • 安装桌面环境和浏览器"
-echo "   • 创建专用用户账户"
-echo "   • 配置自动启动和登录"
-echo ""
-read -p "❓ 确定要继续安装吗？(y/N): " INSTALL_CONFIRM
+# 确定GPU类型
+determine_gpu_type() {
+    if [[ "$INTEL_GPU" == "yes" ]]; then
+        GPU_TYPE="intel"
+    elif [[ "$NVIDIA_GPU" == "yes" ]]; then
+        GPU_TYPE="nvidia"
+    elif [[ "$AMD_GPU" == "yes" ]]; then
+        GPU_TYPE="amd"
+    else
+        GPU_TYPE="generic"
+    fi
+    
+    log_success "确定显卡类型: $GPU_TYPE"
+}
 
-case $INSTALL_CONFIRM in
-    [Yy]|[Yy][Ee][Ss])
-        echo "✅ 开始安装..."
-        ;;
-    *)
-        echo "❌ 安装已取消"
-        exit 0
-        ;;
-esac
+# 执行显卡硬件检测
+detect_gpu_hardware
 
-# 1. 更新系统
-echo ""
-echo "1. 更新系统包..."
-echo "----------------"
-apt update && apt upgrade -y
+# 显示安装确认信息
+display_installation_summary() {
+    log_info "=========================================="
+    log_info "🔍 系统检测完成！"
+    log_info "=========================================="
+    log_info ""
+    log_info "检测结果摘要："
+    log_info "• 音频设备: $WORKING_AUDIO_DEVICE"
+    log_info "• 显卡类型: $GPU_TYPE"
+    
+    if [[ "$INTEL_GPU" == "yes" ]]; then
+        log_info "• 将安装 Intel 显卡支持和硬件加速"
+    fi
+    if [[ "$NVIDIA_GPU" == "yes" ]]; then
+        log_info "• 将安装 NVIDIA 显卡支持和硬件加速"
+    fi
+    if [[ "$AMD_GPU" == "yes" ]]; then
+        log_info "• 将安装 AMD 显卡支持和硬件加速"
+    fi
+    if [[ -z "$INTEL_GPU" && -z "$NVIDIA_GPU" && -z "$AMD_GPU" ]]; then
+        log_info "• 将使用通用显卡配置"
+    fi
+    
+    log_info ""
+    log_warn "⚠️  即将开始安装，此过程将："
+    log_warn "   • 修改系统配置和软件包"
+    log_warn "   • 安装桌面环境和浏览器"
+    log_warn "   • 创建专用用户账户 ($USERNAME)"
+    log_warn "   • 配置自动启动和登录"
+    log_info ""
+}
 
-# 2. 安装基础系统组件
-echo ""
-echo "2. 安装基础系统组件..."
-echo "----------------------"
-apt install -y \
-    curl \
-    wget \
-    apt-transport-https \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    software-properties-common
+# 确认安装意图
+confirm_installation() {
+    display_installation_summary
+    
+    local install_confirm
+    read -p "❓ 确定要继续安装吗？(y/N): " install_confirm
+    
+    case $install_confirm in
+        [Yy]|[Yy][Ee][Ss])
+            log_success "用户确认开始安装"
+            ;;
+        *)
+            log_info "用户取消安装"
+            exit 0
+            ;;
+    esac
+}
 
-# 3. 安装显卡驱动和硬件加速
-echo ""
-echo "3. 安装显卡驱动和硬件加速..."
-echo "-----------------------------"
+# 执行安装确认
+confirm_installation
 
-# 通用组件（所有显卡都需要）
-COMMON_PACKAGES=(
-    vainfo
-    mesa-utils
-    firmware-linux
-)
+# 系统安装步骤函数
+install_system_updates() {
+    log_info "================================================"
+    log_info "步骤 1: 更新系统包"
+    log_info "================================================"
+    
+    # 备份重要的包管理文件
+    backup_file "/etc/apt/sources.list"
+    
+    log_info "更新软件包列表..."
+    safe_execute "apt update"
+    
+    log_info "升级系统软件包..."
+    safe_execute "apt upgrade -y"
+    
+    log_success "系统更新完成"
+}
 
-# Intel 显卡驱动
-INTEL_PACKAGES=(
-    intel-media-va-driver
-    i965-va-driver
-    mesa-va-drivers
-    mesa-vdpau-drivers
-    libva2
-    libva-drm2
-    libvdpau1
-    intel-gpu-tools
-    intel-microcode
-)
+install_basic_components() {
+    log_info "================================================"
+    log_info "步骤 2: 安装基础系统组件"
+    log_info "================================================"
+    
+    local basic_packages=(
+        "curl"
+        "wget" 
+        "apt-transport-https"
+        "ca-certificates"
+        "gnupg"
+        "lsb-release"
+        "software-properties-common"
+    )
+    
+    log_info "安装基础组件包: ${basic_packages[*]}"
+    safe_execute "apt install -y ${basic_packages[*]}"
+    
+    # 验证安装结果
+    for package in "${basic_packages[@]}"; do
+        if dpkg -l | grep -q "^ii.*$package"; then
+            log_success "$package 安装成功"
+        else
+            log_error "$package 安装失败"
+            return 1
+        fi
+    done
+    
+    log_success "基础系统组件安装完成"
+}
 
-# NVIDIA 显卡驱动
-NVIDIA_PACKAGES=(
-    nvidia-driver
-    nvidia-vaapi-driver
-    libnvidia-encode1
-    nvidia-settings
-)
+# 执行系统更新和基础组件安装
+install_system_updates
+install_basic_components
 
-# AMD 显卡驱动  
-AMD_PACKAGES=(
-    mesa-va-drivers
-    mesa-vdpau-drivers
-    libva2
-    libva-drm2
-    libvdpau1
-    radeontop
-    firmware-amd-graphics
-)
+install_gpu_drivers() {
+    log_info "================================================"
+    log_info "步骤 3: 安装显卡驱动和硬件加速"
+    log_info "================================================"
+    
+    # 定义显卡驱动包
+    local common_packages=(
+        "vainfo"
+        "mesa-utils"
+        "firmware-linux"
+    )
+    
+    local intel_packages=(
+        "intel-media-va-driver"
+        "i965-va-driver"
+        "mesa-va-drivers"
+        "mesa-vdpau-drivers"
+        "libva2"
+        "libva-drm2"
+        "libvdpau1"
+        "intel-gpu-tools"
+        "intel-microcode"
+    )
+    
+    local nvidia_packages=(
+        "nvidia-driver"
+        "nvidia-vaapi-driver"
+        "libnvidia-encode1"
+        "nvidia-settings"
+    )
+    
+    local amd_packages=(
+        "mesa-va-drivers"
+        "mesa-vdpau-drivers"
+        "libva2"
+        "libva-drm2"
+        "libvdpau1"
+        "radeontop"
+        "firmware-amd-graphics"
+    )
+    
+    # 安装通用显卡组件
+    log_info "安装通用显卡组件..."
+    safe_execute "apt install -y ${common_packages[*]}"
+    
+    # 根据检测结果安装对应驱动
+    if [[ "$INTEL_GPU" == "yes" ]]; then
+        install_intel_drivers "${intel_packages[@]}"
+    fi
+    
+    if [[ "$NVIDIA_GPU" == "yes" ]]; then
+        install_nvidia_drivers "${nvidia_packages[@]}"
+    fi
+    
+    if [[ "$AMD_GPU" == "yes" ]]; then
+        install_amd_drivers "${amd_packages[@]}"
+    fi
+    
+    # 如果没有特定显卡，使用通用配置
+    if [[ -z "$GPU_TYPE" || "$GPU_TYPE" == "generic" ]]; then
+        log_info "安装通用显卡驱动..."
+        safe_execute "apt install -y mesa-va-drivers mesa-vdpau-drivers libva2 libvdpau1"
+        GPU_TYPE="generic"
+    fi
+    
+    log_success "显卡驱动安装完成，类型: $GPU_TYPE"
+}
 
-# 安装通用组件
-echo "安装通用显卡组件..."
-apt install -y "${COMMON_PACKAGES[@]}"
+install_intel_drivers() {
+    local packages=("$@")
+    log_info "安装 Intel 显卡驱动..."
+    safe_execute "apt install -y ${packages[*]}"
+    log_success "Intel 显卡驱动安装完成"
+}
 
-# 根据检测结果安装对应驱动
-if [ "$INTEL_GPU" = "yes" ]; then
-    echo "安装 Intel 显卡驱动..."
-    apt install -y "${INTEL_PACKAGES[@]}"
-    GPU_TYPE="intel"
-fi
-
-if [ "$NVIDIA_GPU" = "yes" ]; then
-    echo "安装 NVIDIA 显卡驱动..."
+install_nvidia_drivers() {
+    local packages=("$@")
+    log_info "安装 NVIDIA 显卡驱动..."
     
     # 添加 non-free 仓库
     if ! grep -q "non-free" /etc/apt/sources.list; then
-        sed -i 's/main$/main contrib non-free non-free-firmware/' /etc/apt/sources.list
-        apt update
+        log_info "添加 non-free 仓库支持..."
+        backup_file "/etc/apt/sources.list"
+        safe_execute "sed -i 's/main$/main contrib non-free non-free-firmware/' /etc/apt/sources.list"
+        safe_execute "apt update"
     fi
     
-    apt install -y "${NVIDIA_PACKAGES[@]}"
-    GPU_TYPE="nvidia"
-fi
+    safe_execute "apt install -y ${packages[*]}"
+    log_success "NVIDIA 显卡驱动安装完成"
+}
 
-if [ "$AMD_GPU" = "yes" ]; then
-    echo "安装 AMD 显卡驱动..."
-    apt install -y "${AMD_PACKAGES[@]}"
-    GPU_TYPE="amd"
-fi
+install_amd_drivers() {
+    local packages=("$@")
+    log_info "安装 AMD 显卡驱动..."
+    safe_execute "apt install -y ${packages[*]}"
+    log_success "AMD 显卡驱动安装完成"
+}
 
-# 如果没有特定显卡，使用通用配置
-if [ -z "$GPU_TYPE" ]; then
-    echo "使用通用显卡配置..."
-    apt install -y mesa-va-drivers mesa-vdpau-drivers libva2 libvdpau1
-    GPU_TYPE="generic"
-fi
-
-echo "显卡驱动安装完成，类型: $GPU_TYPE"
+# 执行显卡驱动安装
+install_gpu_drivers
 
 # 4. 安装 X11 和 Openbox
 echo ""
@@ -278,8 +692,8 @@ else
     echo "用户 $USERNAME 已存在"
 fi
 
-# 配置用户组
-usermod -aG audio,video,pulse-access,input,tty "$USERNAME"
+# 配置用户组 - 完整的音频权限
+usermod -aG audio,video,pulse,pulse-access,input,tty "$USERNAME"
 
 # 设置目录权限
 chmod 755 /home/"$USERNAME"
@@ -293,26 +707,22 @@ echo "------------------"
 # 创建PulseAudio配置目录
 mkdir -p /home/"$USERNAME"/.config/pulse
 
-# 配置PulseAudio强制优先使用HDMI音频
+# 配置用户级PulseAudio优先使用HDMI音频
 cat > /home/"$USERNAME"/.config/pulse/default.pa <<'EOF'
 #!/usr/bin/pulseaudio -nF
 
 # 加载默认配置
 .include /etc/pulse/default.pa
 
-# 电视盒专用配置 - HDMI音频绝对优先
-# 自动检测并切换到HDMI音频输出
+# 电视盒专用配置 - HDMI音频优先
+# 自动检测并优先切换到HDMI音频输出
 load-module module-switch-on-connect
 
-# 强制HDMI音频优先级
-# 在所有HDMI设备上设置高优先级
+# 音频流救援 - 当设备变更时自动切换音频流
 load-module module-rescue-streams
 
-# 自动路由到HDMI（如果可用）
+# 设备角色管理 - HDMI设备获得媒体播放优先级
 load-module module-intended-roles
-
-# HDMI音频专用配置 - 电视盒场景下默认使用HDMI
-# 这个配置会在PulseAudio启动后自动执行
 EOF
 
 # 创建HDMI优先级启动脚本
@@ -345,41 +755,8 @@ EOF
 
 chmod +x /home/"$USERNAME"/.config/pulse/hdmi-priority.sh
 
-# 创建PulseAudio系统级配置 - 电视盒HDMI优先
-cat > /etc/pulse/system.pa <<'EOF'
-#!/usr/bin/pulseaudio -nF
-
-# 电视盒专用系统级配置 - HDMI音频绝对优先
-
-# 加载基础模块
-load-module module-device-restore
-load-module module-stream-restore
-load-module module-card-restore
-
-# 加载ALSA模块，HDMI优先检测
-load-module module-alsa-sink
-load-module module-alsa-source device=hw:1,0
-
-# HDMI音频优先检测和自动切换
-# 检测所有音频设备，但优先HDMI
-load-module module-detect args="just-one=no"
-
-# 自动连接到HDMI设备（如果可用）
-load-module module-switch-on-connect
-
-# 音频流自动救援到HDMI设备
-load-module module-rescue-streams
-
-# 角色优先级 - HDMI设备获得更高优先级
-load-module module-intended-roles
-
-# 设备恢复时优先选择HDMI
-load-module module-default-device-restore
-
-# 电视盒专用：强制路由策略
-# 所有新的音频流自动路由到HDMI（如果可用）
-load-module module-role-ducking trigger_roles=phone ducking_roles=music,video
-EOF
+# 不创建系统级PulseAudio配置 - 避免与用户级配置冲突
+# 改用用户级配置和启动脚本处理HDMI优先级
 
 # 创建系统级HDMI音频优先级配置
 cat > /etc/pulse/client.conf.d/01-hdmi-priority.conf <<'EOF'
@@ -540,21 +917,37 @@ unclutter -idle 3 &
 # 黑色背景
 xsetroot -solid black
 
-# 电视盒专用音频配置 - 强制HDMI优先
-echo "配置电视盒专用音频系统（HDMI优先）..." >> /home/$USERNAME/.local/log/browser.log
+# 音频系统初始化 - 用户级PulseAudio服务
+echo "初始化音频系统..." >> /home/$USERNAME/.local/log/browser.log
+
+# 确保用户级音频服务正确启动
+systemctl --user stop pulseaudio.service 2>/dev/null || true
+systemctl --user stop pulseaudio.socket 2>/dev/null || true
+pulseaudio --kill 2>/dev/null || true
+sleep 2
 
 # 重新加载ALSA配置
 alsactl restore 2>/dev/null || true
 
-# 启动PulseAudio并强制配置HDMI音频优先级
-pulseaudio --kill 2>/dev/null || true
+# 启动用户级PulseAudio服务
+echo "启动PulseAudio服务..." >> /home/$USERNAME/.local/log/browser.log
+pulseaudio --start --log-target=journal
 sleep 3
-pulseaudio --start &
-sleep 5
 
-# 执行HDMI优先级配置脚本
-echo "执行HDMI优先级配置..." >> /home/$USERNAME/.local/log/browser.log
-/home/$USERNAME/.config/pulse/hdmi-priority.sh
+# 验证PulseAudio运行状态
+if pulseaudio --check; then
+    echo "✓ PulseAudio启动成功" >> /home/$USERNAME/.local/log/browser.log
+    
+    # 执行HDMI优先级配置脚本
+    echo "执行HDMI优先级配置..." >> /home/$USERNAME/.local/log/browser.log
+    /home/$USERNAME/.config/pulse/hdmi-priority.sh
+else
+    echo "⚠️ PulseAudio启动失败，将回退到ALSA" >> /home/$USERNAME/.local/log/browser.log
+    # 设置ALSA回退模式环境变量
+    export PULSE_RUNTIME_PATH=/dev/null
+    export ALSA_PCM_CARD=$AUDIO_CARD
+    export ALSA_PCM_DEVICE=$AUDIO_DEVICE
+fi
 
 # 额外验证HDMI音频配置
 sleep 2
@@ -631,6 +1024,28 @@ export DISPLAY=:0
 export LIBVA_DRIVER_NAME=iHD
 export VDPAU_DRIVER=va_gl
 
+# 智能音频配置检测
+echo "\$(date): 检测音频配置..." >> /home/$USERNAME/.local/log/browser.log
+
+# 检查PulseAudio状态
+if pulseaudio --check >/dev/null 2>&1; then
+    echo "\$(date): PulseAudio运行中，使用PulseAudio音频" >> /home/$USERNAME/.local/log/browser.log
+    AUDIO_MODE="pulse"
+    
+    # 检测并设置HDMI音频设备
+    HDMI_DEVICE=\$(pactl list short sinks | grep -i hdmi | head -1 | cut -f2)
+    if [ -n "\$HDMI_DEVICE" ]; then
+        pactl set-default-sink "\$HDMI_DEVICE" 2>/dev/null || true
+        echo "\$(date): 设置HDMI为默认音频输出: \$HDMI_DEVICE" >> /home/$USERNAME/.local/log/browser.log
+    fi
+else
+    echo "\$(date): PulseAudio不可用，回退到ALSA直接输出" >> /home/$USERNAME/.local/log/browser.log
+    AUDIO_MODE="alsa"
+    export PULSE_RUNTIME_PATH=/dev/null
+    export ALSA_PCM_CARD=$AUDIO_CARD
+    export ALSA_PCM_DEVICE=$AUDIO_DEVICE
+fi
+
 # 智能显示缩放检测
 echo "\$(date): 检测显示器配置..." >> /home/$USERNAME/.local/log/browser.log
 
@@ -683,7 +1098,7 @@ done
 echo "\$(date): 启动 Chromium (智能缩放 + 防撕裂优化)..." >> /home/$USERNAME/.local/log/browser.log
 echo "\$(date): 使用缩放级别: \$BROWSER_ZOOM, DPI: \$DPI_SCALE" >> /home/$USERNAME/.local/log/browser.log
 
-# 启动 Chromium - 添加智能缩放和优化参数
+# 启动 Chromium - 添加智能缩放和优化参数 + ALSA音频
 chromium \\
     --kiosk \\
     --no-first-run \\
@@ -709,10 +1124,8 @@ chromium \\
     --high-dpi-support=1 \\
     --force-color-profile=srgb \\
     --disable-font-subpixel-positioning \\
-    --enable-exclusive-audio \\
-    --try-supported-channel-layouts \\
+    \$(if [ "\$AUDIO_MODE" = "alsa" ]; then echo "--alsa-output-device=$WORKING_AUDIO_DEVICE --enable-exclusive-audio --try-supported-channel-layouts"; fi) \\
     --audio-buffer-size=2048 \\
-    --enable-features=WebRTCPipeWireCapturer \\
     "$DEFAULT_URL" \\
     >> /home/$USERNAME/.local/log/browser.log 2>&1 &
 
@@ -966,6 +1379,78 @@ EOF
 
 chmod +x /home/"$USERNAME"/.local/bin/fix-hdmi-audio.sh
 
+# 音频测试和验证脚本
+cat > /home/"$USERNAME"/.local/bin/test-audio.sh <<'EOF'
+#!/bin/bash
+
+echo "音频系统测试工具"
+echo "================"
+echo ""
+
+# 检查PulseAudio状态
+echo "1. 检查PulseAudio状态..."
+if pulseaudio --check; then
+    echo "✓ PulseAudio 运行中"
+    
+    echo ""
+    echo "2. 可用音频输出设备:"
+    pactl list short sinks
+    
+    echo ""
+    echo "3. 当前默认音频输出:"
+    pactl get-default-sink
+    
+    echo ""
+    echo "4. HDMI音频设备检测:"
+    HDMI_SINK=$(pactl list short sinks | grep -i hdmi | head -1)
+    if [ -n "$HDMI_SINK" ]; then
+        echo "✓ 找到HDMI音频设备: $HDMI_SINK"
+        HDMI_ID=$(echo "$HDMI_SINK" | cut -f1)
+        
+        echo ""
+        read -p "是否测试HDMI音频输出？(y/N): " test_hdmi
+        if [[ "$test_hdmi" =~ ^[Yy]$ ]]; then
+            echo "播放3秒测试音频到HDMI..."
+            speaker-test -t sine -f 1000 -l 3 -D pulse -s 1 &
+            SPEAKER_PID=$!
+            sleep 3
+            kill $SPEAKER_PID 2>/dev/null || true
+            echo "测试完成"
+        fi
+    else
+        echo "❌ 未找到HDMI音频设备"
+    fi
+    
+else
+    echo "❌ PulseAudio 未运行"
+    
+    echo ""
+    echo "2. 检查ALSA设备..."
+    aplay -l | grep -E "(card|device)" || echo "❌ 无ALSA设备"
+    
+    echo ""
+    read -p "是否测试ALSA音频输出？(y/N): " test_alsa
+    if [[ "$test_alsa" =~ ^[Yy]$ ]]; then
+        echo "播放3秒测试音频到ALSA设备..."
+        speaker-test -t sine -f 1000 -l 3 -D hw:0,3 &
+        SPEAKER_PID=$!
+        sleep 3
+        kill $SPEAKER_PID 2>/dev/null || true
+        echo "测试完成"
+    fi
+fi
+
+echo ""
+echo "5. 系统音频组权限检查:"
+groups $USER | grep -q audio && echo "✓ 用户在audio组中" || echo "❌ 用户不在audio组中"
+groups $USER | grep -q pulse && echo "✓ 用户在pulse组中" || echo "❌ 用户不在pulse组中"
+
+echo ""
+echo "测试完成！"
+EOF
+
+chmod +x /home/"$USERNAME"/.local/bin/test-audio.sh
+
 # 14. 设置文件权限
 echo ""
 echo "14. 设置权限..."
@@ -980,21 +1465,42 @@ echo "---------------"
 systemctl enable lightdm
 systemctl set-default graphical.target
 
-# 16. 系统优化和GRUB更新
-echo ""
-echo "16. 系统优化..."
-echo "---------------"
+apply_final_optimizations() {
+    log_info "================================================"
+    log_info "步骤 16: 系统优化和GRUB更新"
+    log_info "================================================"
+    
+    # 备份系统配置文件
+    backup_file "/etc/sysctl.conf"
+    backup_file "/etc/default/grub"
+    
+    # 应用内核参数优化
+    log_info "应用内核参数优化..."
+    
+    # 减少交换使用
+    echo "vm.swappiness=10" >> /etc/sysctl.conf
+    log_info "设置vm.swappiness=10（减少swap使用）"
+    
+    # 优化 I/O
+    echo "vm.dirty_ratio=15" >> /etc/sysctl.conf
+    echo "vm.dirty_background_ratio=5" >> /etc/sysctl.conf
+    log_info "优化I/O参数（dirty_ratio=15, dirty_background_ratio=5）"
+    
+    # 更新 GRUB 配置
+    log_info "更新 GRUB 配置..."
+    safe_execute "update-grub"
+    
+    # 应用系统性能优化
+    optimize_system_performance
+    
+    # 监控当前资源使用
+    monitor_resources
+    
+    log_success "系统优化完成"
+}
 
-# 减少交换使用
-echo "vm.swappiness=10" >> /etc/sysctl.conf
-
-# 优化 I/O
-echo "vm.dirty_ratio=15" >> /etc/sysctl.conf
-echo "vm.dirty_background_ratio=5" >> /etc/sysctl.conf
-
-# 更新 GRUB 配置
-echo "更新 GRUB 配置..."
-update-grub
+# 执行最终优化
+apply_final_optimizations
 
 echo ""
 echo "============================================"
@@ -1022,6 +1528,7 @@ echo ""
 echo "管理命令:"
 echo "- 重启浏览器: sudo -u $USERNAME /home/$USERNAME/.local/bin/restart-browser.sh"
 echo "- 检查状态: sudo -u $USERNAME /home/$USERNAME/.local/bin/check-system.sh"
+echo "- 测试音频: sudo -u $USERNAME /home/$USERNAME/.local/bin/test-audio.sh"
 echo "- 修复HDMI音频: sudo -u $USERNAME /home/$USERNAME/.local/bin/fix-hdmi-audio.sh"
 echo "- 查看监控日志: tail -f /home/$USERNAME/.local/log/browser-monitor.log"
 echo "- 查看浏览器日志: tail -f /home/$USERNAME/.local/log/browser.log"
@@ -1037,6 +1544,18 @@ echo "✓ 安装已完成，需要重启生效"
 echo "✓ 重启后将自动登录并启动浏览器"
 echo "✓ 防撕裂配置需要重启后生效"
 echo "✓ 如有问题，按 Ctrl+Alt+T 打开终端进行调试"
+echo ""
+echo "配置摘要:"
+echo "✓ 音频设备: $WORKING_AUDIO_DEVICE"
+if [ "$INTEL_GPU" = "yes" ]; then
+    echo "✓ Intel 显卡硬件加速已配置"
+fi
+if [ "$NVIDIA_GPU" = "yes" ]; then
+    echo "✓ NVIDIA 显卡硬件加速已配置"
+fi  
+if [ "$AMD_GPU" = "yes" ]; then
+    echo "✓ AMD 显卡硬件加速已配置"
+fi
 echo ""
 echo "硬件加速验证:"
 echo "- 重启后运行: vainfo"
@@ -1058,7 +1577,38 @@ case $REBOOT_CONFIRM in
         ;;
     *)
         echo "⏭️  已跳过重启"
-        echo "💡 手动重启命令: sudo reboot"
+        echo ""
+        
+        # 询问是否重启浏览器应用新配置
+        echo "------------------------------------------"
+        read -p "🔄 是否重启浏览器应用新的音频配置？(y/N): " BROWSER_RESTART
+        
+        case $BROWSER_RESTART in
+            [Yy]|[Yy][Ee][Ss])
+                echo "✅ 正在重启浏览器服务..."
+                
+                # 停止浏览器监控进程
+                sudo -u $USERNAME pkill -f browser-monitor 2>/dev/null || true
+                sudo -u $USERNAME pkill -f chromium 2>/dev/null || true
+                sleep 3
+                
+                # 重新启动浏览器监控
+                echo "🚀 启动浏览器监控进程..."
+                sudo -u $USERNAME nohup /home/$USERNAME/.local/bin/browser-monitor.sh >/dev/null 2>&1 &
+                sleep 2
+                
+                echo "✅ 浏览器已重启，新的音频配置已生效"
+                echo "📺 浏览器应该在几秒内自动启动"
+                ;;
+            *)
+                echo "⏭️  已跳过浏览器重启"
+                echo "💡 手动重启浏览器命令:"
+                echo "   sudo -u $USERNAME /home/$USERNAME/.local/bin/restart-browser.sh"
+                ;;
+        esac
+        
+        echo ""
+        echo "💡 手动重启系统命令: sudo reboot"
         echo "🎉 感谢使用飞牛电视盒配置脚本！"
         ;;
 esac

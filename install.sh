@@ -514,8 +514,10 @@ install_basic_components() {
     
     # 验证安装结果
     for package in "${basic_packages[@]}"; do
-        if dpkg -l | grep -q "^ii.*$package"; then
+        if dpkg -l | grep -q "^ii.*${package}[[:space:]]"; then
             log_success "$package 安装成功"
+        elif dpkg -s "$package" >/dev/null 2>&1; then
+            log_success "$package 已存在"
         else
             log_error "$package 安装失败"
             return 1
